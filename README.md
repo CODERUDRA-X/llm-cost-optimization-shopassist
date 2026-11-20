@@ -76,3 +76,6 @@ python scripts/breakdown.py q2 T-1004 T-1003
 [Ticket messages](data/tickets/) · [Order records](data/orders/) · [Policy articles](data/kb/) · [Billing code](shared/billing.py) · [Boundary and audit tests](tests/test_review.py)
 
 The supplied model client lives in [shared/llm.py](shared/llm.py). The assignment reserves `eval/reference.py` for evaluation and the simulator. Agents must not import it directly.
+
+**Built by [CODERUDRA-X](https://github.com/CODERUDRA-X)**
+*Building the future of AI, Vision Systems, and Defense-Tech.*
