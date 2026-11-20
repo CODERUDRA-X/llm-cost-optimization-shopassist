@@ -10,6 +10,7 @@ from shared.tools import get_order, get_ticket
 
 from question1.agent import ACTIONS, compact_snapshot, compact_thread, parse_resolution
 
+# LLM ko hamesha sirf itne articles dikhate hain, KB chahe 5 ka ho ya 5 lakh ka.
 TOP_K = 3
 
 
@@ -21,8 +22,9 @@ class TicketResolution:
 
 _WORD = re.compile(r"[a-z0-9]+")
 
-# Structured order facts -> article hints. Pure retrieval signal (which articles are
-# worth showing the model); the model still makes the decision from article text.
+# Order ke structured facts se articles ke liye "hint" words.
+# Ye sirf retrieval ke liye hai (kaun se articles dikhane hain). Final decision
+# phir bhi LLM leta hai, article ka text padhke.
 _FACT_HINTS = {
     "license_revealed": "digital license",
     "customized": "custom personalized",
@@ -36,19 +38,26 @@ def _tokens(text: str) -> set[str]:
 
 class SupportPipeline:
     """
-    triage -> retrieve -> compose -> audit, with only `compose` paying for an LLM.
+    Pipeline ke chaaron nodes hain (triage -> retrieve -> compose -> audit),
+    par paise sirf `compose` pe lagte hain, wahi ek LLM call hai.
 
-      triage   (local)  build a compact query from thread + order facts
-      retrieve (local)  lexical top-k over the REAL articles; the 200k-token "expanded"
-                        help center is routing-note filler and is never sent to a model
-      compose  (LLM)    one short call: ticket + order + top-k articles -> JSON
-      audit    (local)  schema/enum/article-id validation; safe fallback = ESCALATE_TIER2
+      triage   (local)  ticket ke words + order facts se ek chhota query bana lo
+      retrieve (local)  asli articles mein keyword match karke top-k nikaalo.
+                        Wo 200k-token wala "expanded help center" mostly filler hai,
+                        use model ko kabhi bhejte hi nahi.
+      compose  (LLM)    ticket + order + top-k articles -> ek line ka JSON
+      audit    (local)  JSON valid hai? action allowed hai? article real hai?
+                        Kuch bhi galat ho to ESCALATE_TIER2 (insaan dekh lega).
+
+    Note: audit sirf format check karta hai. Valid par galat decision ye nahi pakad sakta,
+    uske liye real system mein sampled LLM audit chahiye hoga.
     """
 
     def __init__(self, session: CostSession | None = None):
         self.session = session or CostSession()
         self.llm = LlmClient(self.session)
         self.ids = article_ids()
+        # Articles ek baar load kar lo, har ticket pe dobara disk nahi padhna
         self.docs = {aid: load_article(aid) for aid in self.ids}
 
     # -- node 1: triage (no LLM) ------------------------------------------------
@@ -65,9 +74,12 @@ class SupportPipeline:
 
     # -- node 2: retrieve (no LLM) ----------------------------------------------
     def _retrieve(self, query: set[str]) -> list[str]:
+        # Score = query ke kitne words article mein bhi milte hain. Bahut basic hai
+        # (BM25 ka sabse simple version, bina weighting ke). Bade KB ke liye BM25/embeddings lagana padega.
         def score(aid: str) -> int:
             return len(query & (_tokens(aid.replace("-", " ")) | _tokens(self.docs[aid])))
 
+        # Tie ho to article id ke alphabet se, taaki result har baar same aaye
         ranked = sorted(self.ids, key=lambda a: (-score(a), a))
         return ranked[:TOP_K]
 
@@ -86,13 +98,17 @@ class SupportPipeline:
         return self.llm.chat("compose", [ChatMessage("system", system), ChatMessage("user", user)])
 
     def _body(self, aid: str) -> str:
-        return self.docs[aid].split("\n", 2)[-1].strip()  # drop the "# id" header line
+        # Pehli line "# article-id" header hoti hai, wo already [id] ke roop mein bhej rahe hain
+        return self.docs[aid].split("\n", 2)[-1].strip()
 
     # -- node 4: audit (no LLM) -------------------------------------------------
     def _audit(self, completion: str, allowed: list[str]) -> TicketResolution:
+        # (`allowed` abhi use nahi ho raha, bas retrieved ids ka reference hai.
+        #  Chaho to yahan check laga sakte ho ki article top-k ke andar hi ho.)
         parsed = parse_resolution(completion)
         action, article = parsed.action, parsed.kb_article
         if action not in ACTIONS or article not in self.ids:
+            # Kuch bhi ulta mila to safe fallback: insaan ko bhej do
             return TicketResolution("ESCALATE_TIER2", "returns-within-30-days")
         return TicketResolution(action, article)
 
