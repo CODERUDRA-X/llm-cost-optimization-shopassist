@@ -35,30 +35,13 @@ def parse_resolution(text: str) -> TicketResolution:
     )
 
 
-# How I kept this cheap (my notes, so I don't forget why it looks like this):
-#
-# - Output tokens cost 5x of input, so the biggest win is making the model say less.
-#   The product only reads `action` and `kb_article`. No essays, no "think step by step".
-# - One call per ticket. No retries, no second "audit" call.
-# - Removed the per-run uuid from the system prompt. It changed every run, so the
-#   prompt was never the same twice, and caching could never kick in anyway.
-# - Prompt is only ~190 tokens, below the 1024-token minimum for caching. So I'm not
-#   claiming any cache hit, and I'm not padding it just to reach 1024 (that costs more).
-# - Policy sheet = one line per article, instead of full article text + few-shot examples.
-#
-# Heads up: this sheet is my hand-written summary of the KB articles. If the KB rules
-# change, this needs to be updated too, otherwise they'll go out of sync.
-_SYSTEM = (
-    "ShopAssist Tier-1 router. Reply with ONLY one-line JSON "
-    '{"action":..,"kb_article":..}. No prose.\n'
-    "Actions: REFUND, REPLACE, SEND_ARTICLE, ESCALATE_TIER2.\n"
-    "Articles:\n"
-    "returns-within-30-days: unopened physical, <=30d from delivery -> REFUND; else ESCALATE_TIER2\n"
-    "damage-replacement-7-days: damaged catalog (not customized) item, <=7d -> REPLACE\n"
-    "custom-items-no-replace: customized + damaged -> ESCALATE_TIER2\n"
-    "digital-license-no-refund: license revealed -> SEND_ARTICLE\n"
-    "subscription-cooling-off: subscription <=30d -> REFUND; >30d -> SEND_ARTICLE"
-)
+# Keep policy thresholds explicit when compressing the five source articles.
+_SYSTEM = """Return JSON {"action":...,"kb_article":...}. Apply the matching policy:
+returns-within-30-days: unopened physical item within 30 days of delivery: REFUND, otherwise ESCALATE_TIER2.
+damage-replacement-7-days: damaged standard item within 7 days of delivery: REPLACE.
+custom-items-no-replace: damaged customized item: ESCALATE_TIER2.
+digital-license-no-refund: revealed digital license: SEND_ARTICLE.
+subscription-cooling-off: annual subscription cancelled within 30 days: REFUND, otherwise SEND_ARTICLE."""
 
 # Sirf wahi fields jo upar ke rules mein use hote hain. Baaki (sku, title, etc.)
 # bhejne ka matlab sirf extra tokens, decision pe koi farak nahi.

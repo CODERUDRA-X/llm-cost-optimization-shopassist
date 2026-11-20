@@ -11,7 +11,7 @@ from shared.tools import get_order, get_ticket
 from question1.agent import ACTIONS, compact_snapshot, compact_thread, parse_resolution
 
 # LLM ko hamesha sirf itne articles dikhate hain, KB chahe 5 ka ho ya 5 lakh ka.
-TOP_K = 3
+TOP_K = 2
 
 
 @dataclass
@@ -73,14 +73,24 @@ class SupportPipeline:
         return q
 
     # -- node 2: retrieve (no LLM) ----------------------------------------------
-    def _retrieve(self, query: set[str]) -> list[str]:
+    def _retrieve(self, query: set[str], order: dict) -> list[str]:
         # Score = query ke kitne words article mein bhi milte hain. Bahut basic hai
         # (BM25 ka sabse simple version, bina weighting ke). Bade KB ke liye BM25/embeddings lagana padega.
         def score(aid: str) -> int:
             return len(query & (_tokens(aid.replace("-", " ")) | _tokens(self.docs[aid])))
 
         # Tie ho to article id ke alphabet se, taaki result har baar same aaye
-        ranked = sorted(self.ids, key=lambda a: (-score(a), a))
+        # For known stock items, include both applicable policy families so
+        # compose can evaluate return and damage windows. Unknown/new KB
+        # articles stay eligible through the ordinary lexical search below.
+        if order.get("product_type") == "physical" and order.get("customized") is False:
+            unrelated = {"custom-items-no-replace", "subscription-cooling-off"}
+            if order.get("license_revealed") is not True:
+                unrelated.add("digital-license-no-refund")
+            candidates = [aid for aid in self.ids if aid not in unrelated]
+        else:
+            candidates = self.ids
+        ranked = sorted(candidates, key=lambda a: (-score(a), a))
         return ranked[:TOP_K]
 
     # -- node 3: compose (the only LLM call) ------------------------------------
@@ -103,19 +113,22 @@ class SupportPipeline:
 
     # -- node 4: audit (no LLM) -------------------------------------------------
     def _audit(self, completion: str, allowed: list[str]) -> TicketResolution:
-        # (`allowed` abhi use nahi ho raha, bas retrieved ids ka reference hai.
-        #  Chaho to yahan check laga sakte ho ki article top-k ke andar hi ho.)
-        parsed = parse_resolution(completion)
-        action, article = parsed.action, parsed.kb_article
-        if action not in ACTIONS or article not in self.ids:
-            # Kuch bhi ulta mila to safe fallback: insaan ko bhej do
-            return TicketResolution("ESCALATE_TIER2", "returns-within-30-days")
-        return TicketResolution(action, article)
+        try:
+            parsed = parse_resolution(completion)
+        except (ValueError, KeyError, TypeError):
+            parsed = None
+
+        if parsed and parsed.action in ACTIONS and parsed.kb_article in allowed:
+            return TicketResolution(parsed.action, parsed.kb_article)
+
+        # On handoff the first retrieved article is context for the reviewer.
+        # It does not establish that the customer's requested action is eligible.
+        return TicketResolution("ESCALATE_TIER2", allowed[0])
 
     def handle_ticket(self, ticket_id: str) -> TicketResolution:
         ticket = get_ticket(ticket_id)
         order = get_order(ticket["order_id"])
         query = self._triage(compact_thread(ticket), order)
-        top = self._retrieve(query)
+        top = self._retrieve(query, order)
         draft = self._compose(ticket, order, top)
         return self._audit(draft, top)
